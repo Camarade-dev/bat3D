@@ -22,6 +22,7 @@ interface SpatialViewBabylonProps {
   walls: Wall[]
   spatialModel?: SpatialModel
   selectedFloorId?: string
+  onBackToEditor?: () => void
 }
 
 const WALL_HEIGHT = 3
@@ -243,7 +244,7 @@ const createFloorFromZone = (
   return floorMesh
 }
 
-const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialModel, selectedFloorId }) => {
+const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialModel, selectedFloorId, onBackToEditor }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<Engine | null>(null)
   const sceneRef = useRef<Scene | null>(null)
@@ -568,38 +569,47 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
   // Render function
   return (
     <div className="spatial-view-container">
-      <canvas ref={canvasRef} className="spatial-view-canvas" />
-      {spatialModel && spatialModel.building.floors.length > 0 && (
-        <div className="floor-view-menu">
-          <h3>Sélection d'étage</h3>
-          <div className="control-group">
-            <label htmlFor="floor-view-select">Étage à visualiser :</label>
-            <select
-              id="floor-view-select"
-              value={selectedViewFloorId}
-              onChange={(e) => setSelectedViewFloorId(e.target.value)}
-            >
-              {spatialModel.building.floors.map((floor, index) => (
-                <option key={floor.id} value={floor.id}>
-                  {floor.name} (Étage {index})
-                </option>
-              ))}
-            </select>
-          </div>
-          {selectedViewFloorId && (
-            <div className="view-info">
-              <p>
-                <strong>Étage sélectionné :</strong> {spatialModel.building.floors.find(f => f.id === selectedViewFloorId)?.name}
-              </p>
-              <p className="info-text">
-                • Les étages inférieurs sont complètement visibles<br/>
-                • Les murs de l'étage sélectionné sont cachés<br/>
-                • Les étages supérieurs sont invisibles
-              </p>
+      <div className="spatial-view-canvas-wrapper">
+        <canvas ref={canvasRef} className="spatial-view-canvas" />
+      </div>
+      <div className="spatial-view-sidebar">
+        {onBackToEditor && (
+          <button className="back-to-editor-button" onClick={onBackToEditor}>
+            ← Retour à l'éditeur
+          </button>
+        )}
+        {spatialModel && spatialModel.building.floors.length > 0 && (
+          <>
+            <h3>Sélection d'étage</h3>
+            <div className="control-group">
+              <label htmlFor="floor-view-select">Étage à visualiser :</label>
+              <select
+                id="floor-view-select"
+                value={selectedViewFloorId}
+                onChange={(e) => setSelectedViewFloorId(e.target.value)}
+              >
+                {spatialModel.building.floors.map((floor, index) => (
+                  <option key={floor.id} value={floor.id}>
+                    {floor.name} (Étage {index})
+                  </option>
+                ))}
+              </select>
             </div>
-          )}
-        </div>
-      )}
+            {selectedViewFloorId && (
+              <div className="view-info">
+                <p>
+                  <strong>Étage sélectionné :</strong> {spatialModel.building.floors.find(f => f.id === selectedViewFloorId)?.name}
+                </p>
+                <p className="info-text">
+                  • Les étages inférieurs sont complètement visibles<br/>
+                  • Les murs de l'étage sélectionné sont cachés<br/>
+                  • Les étages supérieurs sont invisibles
+                </p>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   )
 }
