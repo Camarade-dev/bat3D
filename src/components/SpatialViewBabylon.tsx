@@ -128,7 +128,8 @@ const createExtrudedZone = (
     indices.push(1, (i + 1) * 2 + 1, i * 2 + 1)
   }
   
-  // Side faces (extrusion walls) - reversed order to face inward (visible from inside)
+  // Side faces (extrusion walls) - normal order to face outward (visible from outside)
+  // This allows murs to be visible from outside for lower floors
   for (let i = 0; i < numPoints; i++) {
     const next = (i + 1) % numPoints
     const botI = i * 2
@@ -136,10 +137,10 @@ const createExtrudedZone = (
     const botNext = next * 2
     const topNext = next * 2 + 1
     
-    // First triangle of side face (reversed for inward-facing normals)
-    indices.push(botI, topI, botNext)
-    // Second triangle of side face (reversed for inward-facing normals)
-    indices.push(botNext, topI, topNext)
+    // First triangle of side face (normal order for outward-facing normals)
+    indices.push(botI, botNext, topI)
+    // Second triangle of side face (normal order for outward-facing normals)
+    indices.push(botNext, topNext, topI)
   }
   
   // Calculate UVs
@@ -400,11 +401,13 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
             
             zoneMesh.parent = floorRoot
             
-            // Material for extruded zone
+            // Material for extruded zone (murs inclus)
+            // Par défaut, backFaceCulling = false pour voir tous les murs des deux côtés
             const zoneMaterial = new StandardMaterial(`zoneMat_${floor.id}_${zone.id}`, scene)
-            zoneMaterial.diffuseColor = new Color3(0.95, 0.95, 0.9)
+            zoneMaterial.diffuseColor = new Color3(0.85, 0.85, 0.8) // Couleur pour les murs
             zoneMaterial.specularColor = new Color3(0.1, 0.1, 0.1)
-            zoneMaterial.alpha = 0.8
+            zoneMaterial.alpha = 1.0 // Alpha normal par défaut (sera modifié par la logique de visibilité)
+            zoneMaterial.backFaceCulling = false // Désactivé pour voir tous les murs (intérieur et extérieur)
             zoneMesh.material = zoneMaterial
             
             floorMeshesRef.current.push(zoneMesh)
@@ -533,29 +536,33 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
       if (!floorRoot) return
       
       if (index < selectedIndex) {
-        // Étages inférieurs : complètement visibles (avec murs)
+        // Étages inférieurs : TOUS LES MURS visibles, aucune modification
+        // Les murs sont orientés vers l'extérieur et restent visibles normalement
         floorRoot.setEnabled(true)
         zoneMeshes.forEach(mesh => {
           mesh.setEnabled(true)
           if (mesh.material) {
             const mat = mesh.material as StandardMaterial
-            mat.alpha = mesh.name.startsWith('zone_extruded_') ? 0.8 : 1.0
+            // Pas de modification : alpha = 1.0, backFaceCulling = false pour voir tous les murs
+            mat.alpha = 1.0
+            mat.backFaceCulling = false // Désactivé pour voir les 4 murs de la pièce
           }
         })
       } else if (index === selectedIndex) {
-        // Étage sélectionné : zones visibles, murs cachés
-        // Pour voir l'intérieur, on rend les zones extrudées transparentes mais on garde le sol
+        // Étage sélectionné : murs rendus transparents ET double-face pour voir l'intérieur
         floorRoot.setEnabled(true)
         zoneMeshes.forEach(mesh => {
           mesh.setEnabled(true)
           if (mesh.material) {
             const mat = mesh.material as StandardMaterial
             if (mesh.name.startsWith('zone_extruded_')) {
-              // Rendre les murs (faces latérales) transparents pour voir l'intérieur
-              mat.alpha = 0.1 // Presque invisible pour voir l'intérieur
+              // Rendre les murs transparents pour voir l'intérieur
+              mat.alpha = 0.05 // Très transparent
+              mat.backFaceCulling = false // Permet de voir l'intérieur
             } else if (mesh.name.startsWith('zone_floor_')) {
-              // Le sol reste visible
+              // Le sol reste visible normalement
               mat.alpha = 1.0
+              mat.backFaceCulling = true
             }
           }
         })

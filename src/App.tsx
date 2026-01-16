@@ -80,16 +80,14 @@ function App() {
             selectedFloorId={selectedFloorId}
           />
         </div>
-      ) : (
-        <div className="view-3d">
-          <button className="back-button" onClick={handleBackToEditor}>
-            ← Retour à l'éditeur
-          </button>
-          <SpatialViewBabylon 
-            walls={walls} 
-            spatialModel={spatialModel}
-            selectedFloorId={selectedFloorId}
-          />
+              ) : (
+                <div className="view-3d">
+                  <SpatialViewBabylon
+                    walls={walls} 
+                    spatialModel={spatialModel}
+                    selectedFloorId={selectedFloorId}
+                    onBackToEditor={handleBackToEditor}
+                  />
         </div>
       )}
     </div>
