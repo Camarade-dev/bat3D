@@ -11,7 +11,8 @@ import {
   Color3,
   Color4,
   Mesh,
-  VertexData
+  VertexData,
+  TransformNode
 } from '@babylonjs/core'
 import { Wall } from './FloorPlanEditor'
 import { SpatialModel, Floor, Zone } from '../models/SpatialModel'
@@ -81,69 +82,71 @@ const createWall = (
   return wall
 }
 
-const createFloorFromZone = (
+// Create extruded zone mesh (2.5D extrusion)
+const createExtrudedZone = (
   name: string,
   zone: Zone,
   floor: Floor,
+  height: number,
+  offsetX: number,
+  offsetZ: number,
   scene: Scene
 ): Mesh => {
   const elevation = floor.elevation
-  // Convert zone coordinates (in meters) to pixels first, then to 3D
-  // This matches how walls are created from zones
   const planScale = floor.plan2D.scale || 30 // pixels per meter
   
-  // Convert 2D polygon to 3D vertices
+  // Convert 2D polygon to 3D vertices with offset to center building
   const vertices: number[] = []
   const indices: number[] = []
   const normals: number[] = []
   const uvs: number[] = []
   
-  // Create vertices for top and bottom surfaces of the floor (with thickness)
   const numPoints = zone.polygon2D.length
   
+  // Create vertices for bottom and top surfaces
+  // Vertices are relative to mesh position, which will be at y = elevation + height/2
+  const halfHeight = height / 2
   zone.polygon2D.forEach((point) => {
-    // First convert meters to pixels (like walls), then pixels to 3D
-    const xPixels = point.x * planScale
-    const yPixels = point.y * planScale
-    const x3D = xPixels * SCALE
-    const z3D = yPixels * SCALE
+    // Convert plan coordinates to 3D: scale (pixels → world units) + offset (centering)
+    const x3D = point.x * planScale * SCALE + offsetX
+    const z3D = point.y * planScale * SCALE + offsetZ
     
-    // Top surface at elevation + thickness
-    vertices.push(x3D, elevation + FLOOR_THICKNESS, z3D)
-    // Bottom surface at elevation
-    vertices.push(x3D, elevation, z3D)
+    // Bottom surface (relative to mesh center, which will be at elevation + height/2)
+    vertices.push(x3D, -halfHeight, z3D)
+    // Top surface (relative to mesh center)
+    vertices.push(x3D, halfHeight, z3D)
   })
   
-  // Top face triangulation (fan triangulation)
+  // Bottom face triangulation (fan triangulation)
   for (let i = 1; i < numPoints - 1; i++) {
     indices.push(0, i * 2, (i + 1) * 2)
   }
   
-  // Bottom face triangulation (reverse order for correct normals)
+  // Top face triangulation (reverse order for correct normals)
   for (let i = 1; i < numPoints - 1; i++) {
     indices.push(1, (i + 1) * 2 + 1, i * 2 + 1)
   }
   
-  // Side faces (connect top and bottom)
+  // Side faces (extrusion walls) - reversed order to face inward (visible from inside)
   for (let i = 0; i < numPoints; i++) {
     const next = (i + 1) % numPoints
-    const topI = i * 2
-    const botI = i * 2 + 1
-    const topNext = next * 2
-    const botNext = next * 2 + 1
+    const botI = i * 2
+    const topI = i * 2 + 1
+    const botNext = next * 2
+    const topNext = next * 2 + 1
     
-    // First triangle of side face
-    indices.push(topI, botI, botNext)
-    // Second triangle of side face
-    indices.push(topI, botNext, topNext)
+    // First triangle of side face (reversed for inward-facing normals)
+    indices.push(botI, topI, botNext)
+    // Second triangle of side face (reversed for inward-facing normals)
+    indices.push(botNext, topI, topNext)
   }
   
-  // Calculate UVs for both surfaces
-  zone.polygon2D.forEach((point) => {
-    uvs.push(point.x / 100, point.y / 100) // Top surface UV
+  // Calculate UVs
+  zone.polygon2D.forEach((_point, i) => {
+    uvs.push(i / numPoints, 0) // Bottom surface UV
   })
-  zone.polygon2D.forEach((point) => {
-    uvs.push(point.x / 100, point.y / 100) // Bottom surface UV
+  zone.polygon2D.forEach((_point, i) => {
+    uvs.push(i / numPoints, 1) // Top surface UV
   })
   
   const vertexData = new VertexData()
@@ -155,13 +158,87 @@ const createFloorFromZone = (
   VertexData.ComputeNormals(vertices, indices, normals)
   vertexData.normals = normals
   
+  const zoneMesh = new Mesh(name, scene)
+  vertexData.applyToMesh(zoneMesh, true)
+  
+  // 3.2: Position mesh at y = floor.elevation + height/2
+  zoneMesh.position.y = elevation + height / 2
+  zoneMesh.position.x = 0  // Centered horizontally
+  zoneMesh.position.z = 0  // Centered horizontally
+  
+  return zoneMesh
+}
+
+// Create floor mesh (separate from extruded zone, for floor thickness)
+const createFloorFromZone = (
+  name: string,
+  zone: Zone,
+  floor: Floor,
+  offsetX: number,
+  offsetZ: number,
+  scene: Scene
+): Mesh => {
+  const elevation = floor.elevation
+  const planScale = floor.plan2D.scale || 30 // pixels per meter
+  
+  const vertices: number[] = []
+  const indices: number[] = []
+  const normals: number[] = []
+  const uvs: number[] = []
+  
+  const numPoints = zone.polygon2D.length
+  
+  zone.polygon2D.forEach((point) => {
+    // Apply scale and offset
+    const x3D = point.x * planScale * SCALE + offsetX
+    const z3D = point.y * planScale * SCALE + offsetZ
+    
+    // Top surface at elevation + thickness
+    vertices.push(x3D, elevation + FLOOR_THICKNESS, z3D)
+    // Bottom surface at elevation
+    vertices.push(x3D, elevation, z3D)
+  })
+  
+  // Top face triangulation
+  for (let i = 1; i < numPoints - 1; i++) {
+    indices.push(0, i * 2, (i + 1) * 2)
+  }
+  
+  // Bottom face triangulation
+  for (let i = 1; i < numPoints - 1; i++) {
+    indices.push(1, (i + 1) * 2 + 1, i * 2 + 1)
+  }
+  
+  // Side faces
+  for (let i = 0; i < numPoints; i++) {
+    const next = (i + 1) % numPoints
+    const topI = i * 2
+    const botI = i * 2 + 1
+    const topNext = next * 2
+    const botNext = next * 2 + 1
+    
+    indices.push(topI, botI, botNext)
+    indices.push(topI, botNext, topNext)
+  }
+  
+  // Calculate UVs
+  zone.polygon2D.forEach((point) => {
+    uvs.push(point.x / 100, point.y / 100)
+  })
+  zone.polygon2D.forEach((point) => {
+    uvs.push(point.x / 100, point.y / 100)
+  })
+  
+  const vertexData = new VertexData()
+  vertexData.positions = vertices
+  vertexData.indices = indices
+  vertexData.uvs = uvs
+  
+  VertexData.ComputeNormals(vertices, indices, normals)
+  vertexData.normals = normals
+  
   const floorMesh = new Mesh(name, scene)
-  vertexData.applyToMesh(floorMesh, true) // updatable = true
-  
-  // Position the floor mesh so its center is at the middle of its thickness
-  // No need to adjust position.y as vertices are already at correct elevation
-  
-  console.log(`Floor mesh ${name} created with thickness ${FLOOR_THICKNESS}m at elevation ${elevation}m`)
+  vertexData.applyToMesh(floorMesh, true)
   
   return floorMesh
 }
@@ -223,8 +300,11 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
       }
     }
     
+    // Calculate building center offset (to center the building at origin)
     const centerX = (bounds.minX + bounds.maxX) / 2 * SCALE
     const centerZ = (bounds.minY + bounds.maxY) / 2 * SCALE
+    const offsetX = -centerX  // Offset to center building
+    const offsetZ = -centerZ  // Offset to center building
     const maxDim = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) * SCALE || 20
     
     // Calculate total height for camera positioning (sum of all floor heights with cumulative stacking)
@@ -246,15 +326,17 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
       totalHeight = WALL_HEIGHT
     }
 
+    // Camera positioned to see inside the building (looking from outside in)
+    // Adjust angles to view from inside: alpha (horizontal) and beta (vertical)
     const camera = new ArcRotateCamera(
       'camera',
-      -Math.PI / 2.5,
-      Math.PI / 3,
-      Math.max(maxDim * 2, totalHeight * 2),
-      new Vector3(centerX, totalHeight / 2, centerZ),
+      Math.PI / 2.5, // Rotated 180° to look from inside
+      Math.PI / 2.5, // Higher angle to see down into rooms
+      Math.max(maxDim * 1.5, totalHeight * 1.5),
+      new Vector3(0, totalHeight / 2, 0),
       scene
     )
-    camera.setTarget(new Vector3(centerX, totalHeight / 2, centerZ))
+    camera.setTarget(new Vector3(0, totalHeight / 2, 0))
     camera.lowerRadiusLimit = 5
     camera.upperRadiusLimit = maxDim * 4
     camera.attachControl(canvasRef.current, true)
@@ -269,76 +351,75 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
     // If we have spatial model, render all floors stacked on top of each other
     if (spatialModel && spatialModel.building.floors.length > 0) {
       // Calculate cumulative elevations to avoid overlap
-      // Each floor's actual base is the previous floor's top
       let cumulativeElevation = 0
       
-      // Iterate through all floors and create their walls and floors
+      // Iterate through all floors and create their meshes
       spatialModel.building.floors.forEach((floor, floorIndex) => {
-        // Use the floor's elevation if specified, otherwise stack on previous floor
+        // Calculate floor elevation (cumulative stacking)
         let floorElevation: number
         if (floorIndex === 0) {
           floorElevation = floor.elevation
-          cumulativeElevation = floorElevation
+          cumulativeElevation = floor.elevation
         } else {
-          // Calculate based on previous floor's total height
           const previousFloor = spatialModel.building.floors[floorIndex - 1]
-          cumulativeElevation = cumulativeElevation + previousFloor.defaultHeight + FLOOR_THICKNESS
+          cumulativeElevation = cumulativeElevation + FLOOR_THICKNESS + previousFloor.defaultHeight
           floorElevation = Math.max(floor.elevation, cumulativeElevation)
           cumulativeElevation = floorElevation
         }
         
-        const floorHeight = floor.defaultHeight
-        const planScale = floor.plan2D.scale || 30
-
-        // Create walls from zones for this floor
+        // 3.2: Create parent node floorRoot for this floor
+        const floorRoot = new TransformNode(`floorRoot_${floor.id}`, scene)
+        floorRoot.position = new Vector3(0, 0, 0) // Parent is at origin, children will be positioned
+        
+        // For each zone in this floor
         floor.zones.forEach((zone) => {
           if (zone.polygon2D && zone.polygon2D.length >= 3) {
-            // Create walls from polygon edges
-            for (let i = 0; i < zone.polygon2D.length; i++) {
-              const startPoint = zone.polygon2D[i]
-              const endPoint = zone.polygon2D[(i + 1) % zone.polygon2D.length]
-              
-              const start = new Vector3(
-                startPoint.x * planScale * SCALE,
-                floorElevation + FLOOR_THICKNESS,
-                startPoint.y * planScale * SCALE
-              )
-              const end = new Vector3(
-                endPoint.x * planScale * SCALE,
-                floorElevation + FLOOR_THICKNESS,
-                endPoint.y * planScale * SCALE
-              )
-              
-              const wallMesh = createWall(`wall_${floor.id}_zone_${zone.id}_${i}`, start, end, floorHeight, scene)
-              
-              // Position the wall on top of the floor (floor elevation + floor thickness + half wall height)
-              wallMesh.position.y = floorElevation + FLOOR_THICKNESS + floorHeight / 2
-              
-              const wallMaterial = new StandardMaterial(`wallMat_${floor.id}_${zone.id}_${i}`, scene)
-              wallMaterial.diffuseColor = new Color3(0.85, 0.85, 0.85)
-              wallMaterial.specularColor = new Color3(0.1, 0.1, 0.1)
-              wallMesh.material = wallMaterial
-
-              wallMeshesRef.current.push(wallMesh)
-            }
-
-            // Create floor for this zone (use adjusted elevation)
-            const floorWithAdjustedElevation = { ...floor, elevation: floorElevation }
+            // Use zone.heightOverride || floor.defaultHeight
+            const zoneHeight = zone.heightOverride || floor.defaultHeight
+            
+            // 3.2: Create extruded mesh for the zone
+            // The mesh is positioned at y = floor.elevation + height/2 inside createExtrudedZone
+            const zoneMesh = createExtrudedZone(
+              `zone_extruded_${floor.id}_${zone.id}`,
+              zone,
+              { ...floor, elevation: floorElevation },
+              zoneHeight,
+              offsetX,
+              offsetZ,
+              scene
+            )
+            
+            zoneMesh.parent = floorRoot
+            
+            // Material for extruded zone
+            const zoneMaterial = new StandardMaterial(`zoneMat_${floor.id}_${zone.id}`, scene)
+            zoneMaterial.diffuseColor = new Color3(0.95, 0.95, 0.9)
+            zoneMaterial.specularColor = new Color3(0.1, 0.1, 0.1)
+            zoneMaterial.alpha = 0.8
+            zoneMesh.material = zoneMaterial
+            
+            floorMeshesRef.current.push(zoneMesh)
+            
+            // Also create floor surface for visual clarity
             const floorMesh = createFloorFromZone(
               `zone_floor_${floor.id}_${zone.id}`,
               zone,
-              floorWithAdjustedElevation,
+              { ...floor, elevation: floorElevation },
+              offsetX,
+              offsetZ,
               scene
             )
             
             const floorMaterial = new StandardMaterial(`zoneFloorMat_${floor.id}_${zone.id}`, scene)
-            floorMaterial.diffuseColor = new Color3(0.95, 0.95, 0.9)
+            floorMaterial.diffuseColor = new Color3(0.9, 0.9, 0.85)
             floorMaterial.specularColor = new Color3(0.1, 0.1, 0.1)
             floorMaterial.alpha = 1.0
             floorMesh.material = floorMaterial
+            floorMesh.parent = floorRoot
             
             floorMeshesRef.current.push(floorMesh)
-            console.log(`Created floor and walls for ${zone.name} on ${floor.name} at elevation ${floorElevation}m`)
+            
+            console.log(`Created extruded zone ${zone.name} on ${floor.name} at elevation ${floorElevation}m with height ${zoneHeight}m`)
           }
         })
       })
