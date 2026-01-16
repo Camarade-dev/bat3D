@@ -557,7 +557,7 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
             const mat = mesh.material as StandardMaterial
             if (mesh.name.startsWith('zone_extruded_')) {
               // Rendre les murs transparents pour voir l'intérieur
-              mat.alpha = 0.05 // Très transparent
+              mat.alpha = 0.25 // Très transparent
               mat.backFaceCulling = false // Permet de voir l'intérieur
             } else if (mesh.name.startsWith('zone_floor_')) {
               // Le sol reste visible normalement
