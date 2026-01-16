@@ -15,7 +15,7 @@ import {
   TransformNode
 } from '@babylonjs/core'
 import { Wall } from './FloorPlanEditor'
-import { SpatialModel, Floor, Zone } from '../models/SpatialModel'
+import { SpatialModel, Floor, Zone, TimeSeriesPoint } from '../models/SpatialModel'
 import './SpatialViewBabylon.css'
 
 interface SpatialViewBabylonProps {
@@ -28,6 +28,93 @@ interface SpatialViewBabylonProps {
 const WALL_HEIGHT = 3
 const SCALE = 1 / 30
 const FLOOR_THICKNESS = 0.1 // Thickness of floor in meters
+
+// 4.1: Définir les seuils par métrique
+interface MetricThresholds {
+  green: number
+  yellow: number
+  orange: number
+  red: number
+}
+
+const METRIC_THRESHOLDS: Record<string, MetricThresholds> = {
+  CO2: { green: 800, yellow: 1000, orange: 1200, red: 1200 },
+  TVOC: { green: 200, yellow: 300, orange: 400, red: 400 },
+  PM25: { green: 10, yellow: 20, orange: 30, red: 30 }
+}
+
+// 4.2: Obtenir la couleur de l'état selon la valeur et la métrique
+const getStateColor = (metric: string, value: number): Color3 => {
+  const thresholds = METRIC_THRESHOLDS[metric] || METRIC_THRESHOLDS.CO2
+  
+  if (value < thresholds.green) {
+    return new Color3(0.2, 0.8, 0.3) // Vert
+  } else if (value < thresholds.yellow) {
+    return new Color3(0.9, 0.9, 0.2) // Jaune
+  } else if (value < thresholds.orange) {
+    return new Color3(1.0, 0.6, 0.2) // Orange
+  } else {
+    return new Color3(0.9, 0.2, 0.2) // Rouge
+  }
+}
+
+// 4.3: Appliquer la confiance → saturation/alpha
+const applyConfidenceModifier = (
+  baseColor: Color3,
+  confidence: number,
+  material: StandardMaterial
+): void => {
+  if (confidence >= 0.8) {
+    // Confiance haute → couleur normale, alpha ~0.9
+    material.diffuseColor = baseColor
+    material.alpha = 0.9
+  } else if (confidence >= 0.6) {
+    // Confiance moyenne → désaturation légère, alpha ~0.75
+    const gray = (baseColor.r + baseColor.g + baseColor.b) / 3
+    material.diffuseColor = Color3.Lerp(new Color3(gray, gray, gray), baseColor, 0.7)
+    material.alpha = 0.75
+  } else {
+    // Confiance basse → grisage + alpha ~0.55 + outline "incertain"
+    const gray = (baseColor.r + baseColor.g + baseColor.b) / 3
+    material.diffuseColor = new Color3(gray * 0.8, gray * 0.8, gray * 0.8)
+    material.alpha = 0.55
+    material.emissiveColor = new Color3(0.3, 0.3, 0.3) // Outline "incertain" via émission
+  }
+}
+
+// Obtenir la valeur de métrique d'une zone à un temps donné
+const getZoneMetricValueAtTime = (
+  zone: Zone,
+  metric: string,
+  timeIndex: number,
+  useRandomValues: boolean = false
+): TimeSeriesPoint | undefined => {
+  // Si on utilise des valeurs aléatoires (mode play), générer des valeurs
+  if (useRandomValues) {
+    const thresholds = METRIC_THRESHOLDS[metric] || METRIC_THRESHOLDS.CO2
+    
+    // Générer une valeur aléatoire entre 0 et 150% du seuil rouge pour avoir des variations
+    const maxValue = thresholds.red * 1.5
+    const value = Math.random() * maxValue
+    
+    // Générer une confiance aléatoire entre 0.5 et 1.0
+    const confidence = 0.5 + Math.random() * 0.5
+    
+    return { value, confidence }
+  }
+  
+  // Sinon, utiliser les données existantes
+  const series = zone.timeseries[metric]
+  if (!series || timeIndex < 0 || timeIndex >= series.length) {
+    // Si on est en dehors des données, générer des valeurs aléatoires même en mode stop
+    const thresholds = METRIC_THRESHOLDS[metric] || METRIC_THRESHOLDS.CO2
+    const maxValue = thresholds.red * 1.5
+    const value = Math.random() * maxValue
+    const confidence = 0.5 + Math.random() * 0.5
+    return { value, confidence }
+  }
+  return series[timeIndex]
+}
 
 const calculateBounds = (walls: Wall[]) => {
   if (walls.length === 0) {
@@ -256,6 +343,10 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
   const zoneMeshesRef = useRef<Map<string, Mesh[]>>(new Map()) // floorId -> zone meshes
   const wallMeshesPerFloorRef = useRef<Map<string, Mesh[]>>(new Map()) // floorId -> wall meshes
   const [selectedViewFloorId, setSelectedViewFloorId] = useState<string>('')
+  const [selectedMetric, setSelectedMetric] = useState<string>('CO2') // Métrique sélectionnée
+  const [timeIndex, setTimeIndex] = useState<number>(0) // Index de temps (0..N-1)
+  const [isPlaying, setIsPlaying] = useState<boolean>(false) // État play/stop
+  const playIntervalRef = useRef<number | null>(null) // Référence pour l'interval d'animation
 
   useEffect(() => {
     if (!canvasRef.current) return
@@ -401,13 +492,22 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
             
             zoneMesh.parent = floorRoot
             
-            // Material for extruded zone (murs inclus)
-            // Par défaut, backFaceCulling = false pour voir tous les murs des deux côtés
+            // Material for extruded zone (murs inclus) avec colorimétrie basée sur l'état
             const zoneMaterial = new StandardMaterial(`zoneMat_${floor.id}_${zone.id}`, scene)
-            zoneMaterial.diffuseColor = new Color3(0.85, 0.85, 0.8) // Couleur pour les murs
             zoneMaterial.specularColor = new Color3(0.1, 0.1, 0.1)
-            zoneMaterial.alpha = 1.0 // Alpha normal par défaut (sera modifié par la logique de visibilité)
             zoneMaterial.backFaceCulling = false // Désactivé pour voir tous les murs (intérieur et extérieur)
+            
+            // Initialiser avec la colorimétrie selon la métrique et le temps sélectionnés
+            const metricData = getZoneMetricValueAtTime(zone, selectedMetric, timeIndex)
+            if (metricData) {
+              const stateColor = getStateColor(selectedMetric, metricData.value)
+              applyConfidenceModifier(stateColor, metricData.confidence, zoneMaterial)
+            } else {
+              // Pas de données : couleur par défaut
+              zoneMaterial.diffuseColor = new Color3(0.85, 0.85, 0.8)
+              zoneMaterial.alpha = 0.5
+            }
+            
             zoneMesh.material = zoneMaterial
             
             floorMeshesRef.current.push(zoneMesh)
@@ -504,6 +604,11 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
 
     return () => {
       window.removeEventListener('resize', handleResize)
+      // Nettoyer l'interval de play/stop si présent
+      if (playIntervalRef.current !== null) {
+        clearInterval(playIntervalRef.current)
+        playIntervalRef.current = null
+      }
       wallMeshesRef.current.forEach(mesh => mesh.dispose())
       wallMeshesRef.current = []
       floorMeshesRef.current.forEach(mesh => mesh.dispose())
@@ -519,6 +624,91 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
     }
   }, [walls, spatialModel, selectedFloorId])
   
+  // Fonction pour mettre à jour les matériaux des zones selon la métrique et le temps
+  const updateZoneMaterials = (metric: string, t: number, useRandomValues: boolean = false) => {
+    if (!spatialModel || !sceneRef.current) return
+
+    spatialModel.building.floors.forEach((floor) => {
+      const zoneMeshes = zoneMeshesRef.current.get(floor.id) || []
+      
+      floor.zones.forEach((zone) => {
+        // Trouver le mesh extrudé pour cette zone (pas le floor mesh)
+        const zoneMesh = zoneMeshes.find(
+          (mesh) => mesh.name === `zone_extruded_${floor.id}_${zone.id}`
+        )
+        
+        if (!zoneMesh || !zoneMesh.material) return
+
+        const material = zoneMesh.material as StandardMaterial
+        const metricData = getZoneMetricValueAtTime(zone, metric, t, useRandomValues)
+
+        if (metricData) {
+          // 4.2: Matériau dépend de (metric, t)
+          const stateColor = getStateColor(metric, metricData.value)
+          // 4.3: Appliquer la confiance → saturation/alpha
+          applyConfidenceModifier(stateColor, metricData.confidence, material)
+        } else {
+          // Pas de données : couleur par défaut
+          material.diffuseColor = new Color3(0.85, 0.85, 0.8)
+          material.alpha = 0.5
+        }
+      })
+    })
+  }
+
+  // Effet pour réinitialiser timeIndex si nécessaire quand la métrique change
+  useEffect(() => {
+    if (!spatialModel || spatialModel.building.floors.length === 0) return
+    
+    // Calculer le max pour la métrique sélectionnée
+    const allLengths = spatialModel.building.floors.flatMap(floor => 
+      floor.zones.map(z => z.timeseries[selectedMetric]?.length || 0)
+    )
+    const maxLength = allLengths.length > 0 ? Math.max(...allLengths) : 0
+    const maxIndex = Math.max(0, maxLength - 1)
+    
+    // Réinitialiser si timeIndex dépasse le max
+    if (timeIndex > maxIndex) {
+      setTimeIndex(Math.max(0, maxIndex))
+    }
+  }, [selectedMetric, spatialModel])
+
+  // Effet pour gérer le play/stop avec génération de valeurs aléatoires
+  useEffect(() => {
+    // Nettoyer l'interval précédent s'il existe
+    if (playIntervalRef.current !== null) {
+      clearInterval(playIntervalRef.current)
+      playIntervalRef.current = null
+    }
+
+    if (isPlaying) {
+      // Créer un interval pour faire avancer le temps toutes les 500ms
+      playIntervalRef.current = window.setInterval(() => {
+        setTimeIndex((prevIndex) => {
+          // En mode play, on génère toujours des valeurs aléatoires (pas de limite max)
+          // On incrémente juste l'index pour l'affichage, mais les valeurs sont aléatoires
+          return prevIndex + 1
+        })
+      }, 500) // 500ms = 2 fois par seconde
+    }
+
+    return () => {
+      if (playIntervalRef.current !== null) {
+        clearInterval(playIntervalRef.current)
+        playIntervalRef.current = null
+      }
+    }
+  }, [isPlaying])
+
+  // Effet pour mettre à jour les matériaux quand la métrique ou le temps change
+  useEffect(() => {
+    if (!spatialModel || spatialModel.building.floors.length === 0 || !sceneRef.current) return
+    // Attendre que les meshes soient créés
+    if (zoneMeshesRef.current.size === 0) return
+    // En mode play, utiliser des valeurs aléatoires
+    updateZoneMaterials(selectedMetric, timeIndex, isPlaying)
+  }, [selectedMetric, timeIndex, spatialModel, isPlaying])
+
   // Effect to update visibility based on selected view floor
   useEffect(() => {
     if (!spatialModel || !sceneRef.current || spatialModel.building.floors.length === 0 || !selectedViewFloorId) return
@@ -602,6 +792,90 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
                 ))}
               </select>
             </div>
+            
+            <h3>Métrique</h3>
+            <div className="control-group">
+              <label htmlFor="metric-select">Métrique à visualiser :</label>
+              <select
+                id="metric-select"
+                value={selectedMetric}
+                onChange={(e) => setSelectedMetric(e.target.value)}
+              >
+                <option value="CO2">CO2 (ppm)</option>
+                <option value="TVOC">TVOC (ppb)</option>
+                <option value="PM25">PM2.5 (µg/m³)</option>
+              </select>
+            </div>
+            
+            <h3>Temps</h3>
+            <div className="control-group">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+                <button
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  style={{
+                    padding: '8px 16px',
+                    fontSize: '1rem',
+                    fontWeight: '600',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    backgroundColor: isPlaying ? '#e63333' : '#33cc33',
+                    color: 'white',
+                    transition: 'background-color 0.2s',
+                    minWidth: '100px'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = isPlaying ? '#cc0000' : '#28a028'
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = isPlaying ? '#e63333' : '#33cc33'
+                  }}
+                >
+                  {isPlaying ? '⏸ Stop' : '▶ Play'}
+                </button>
+                <label htmlFor="time-slider" style={{ flex: 1 }}>
+                  Index de temps : {timeIndex}
+                </label>
+              </div>
+              {spatialModel.building.floors.length > 0 && (() => {
+                // Calculer le max de tous les étages et zones (seulement si pas en mode play)
+                if (isPlaying) {
+                  // En mode play, afficher un message indiquant la génération aléatoire
+                  return (
+                    <div style={{ fontSize: '0.85em', color: '#666', marginTop: '5px', padding: '8px', background: '#f0f0f0', borderRadius: '4px' }}>
+                      🔄 Mode aléatoire actif - Les valeurs sont générées en continu
+                    </div>
+                  )
+                }
+                
+                const allLengths = spatialModel.building.floors.flatMap(floor => 
+                  floor.zones.map(z => z.timeseries[selectedMetric]?.length || 0)
+                )
+                const maxLength = allLengths.length > 0 ? Math.max(...allLengths) : 0
+                const maxIndex = Math.max(0, maxLength - 1)
+                
+                if (maxLength === 0) return null
+                
+                return (
+                  <>
+                    <input
+                      id="time-slider"
+                      type="range"
+                      min="0"
+                      max={maxIndex}
+                      value={Math.min(timeIndex, maxIndex)}
+                      onChange={(e) => setTimeIndex(parseInt(e.target.value))}
+                      style={{ width: '100%' }}
+                      disabled={isPlaying}
+                    />
+                    <div className="time-info" style={{ fontSize: '0.85em', color: '#666', marginTop: '5px' }}>
+                      T = {Math.min(timeIndex, maxIndex)} (sur {maxIndex})
+                    </div>
+                  </>
+                )
+              })()}
+            </div>
+            
             {selectedViewFloorId && (
               <div className="view-info">
                 <p>
@@ -609,8 +883,15 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
                 </p>
                 <p className="info-text">
                   • Les étages inférieurs sont complètement visibles<br/>
-                  • Les murs de l'étage sélectionné sont cachés<br/>
+                  • Les murs de l'étage sélectionné sont transparents<br/>
                   • Les étages supérieurs sont invisibles
+                </p>
+                <p className="info-text" style={{ marginTop: '10px' }}>
+                  <strong>Légende des couleurs ({selectedMetric}):</strong><br/>
+                  <span style={{ color: '#33cc33' }}>●</span> Vert : &lt;{METRIC_THRESHOLDS[selectedMetric]?.green}<br/>
+                  <span style={{ color: '#e6e600' }}>●</span> Jaune : &lt;{METRIC_THRESHOLDS[selectedMetric]?.yellow}<br/>
+                  <span style={{ color: '#ff9900' }}>●</span> Orange : &lt;{METRIC_THRESHOLDS[selectedMetric]?.orange}<br/>
+                  <span style={{ color: '#e63333' }}>●</span> Rouge : &gt;={METRIC_THRESHOLDS[selectedMetric]?.red}
                 </p>
               </div>
             )}
