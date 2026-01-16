@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   Engine,
   Scene,
@@ -250,6 +250,10 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
   const cameraRef = useRef<ArcRotateCamera | null>(null)
   const wallMeshesRef = useRef<Mesh[]>([])
   const floorMeshesRef = useRef<Mesh[]>([])
+  const floorRootsRef = useRef<Map<string, TransformNode>>(new Map())
+  const zoneMeshesRef = useRef<Map<string, Mesh[]>>(new Map()) // floorId -> zone meshes
+  const wallMeshesPerFloorRef = useRef<Map<string, Mesh[]>>(new Map()) // floorId -> wall meshes
+  const [selectedViewFloorId, setSelectedViewFloorId] = useState<string>('')
 
   useEffect(() => {
     if (!canvasRef.current) return
@@ -370,6 +374,10 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
         // 3.2: Create parent node floorRoot for this floor
         const floorRoot = new TransformNode(`floorRoot_${floor.id}`, scene)
         floorRoot.position = new Vector3(0, 0, 0) // Parent is at origin, children will be positioned
+        floorRootsRef.current.set(floor.id, floorRoot)
+        
+        // Store meshes for this floor
+        const floorZoneMeshes: Mesh[] = []
         
         // For each zone in this floor
         floor.zones.forEach((zone) => {
@@ -399,6 +407,7 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
             zoneMesh.material = zoneMaterial
             
             floorMeshesRef.current.push(zoneMesh)
+            floorZoneMeshes.push(zoneMesh)
             
             // Also create floor surface for visual clarity
             const floorMesh = createFloorFromZone(
@@ -418,11 +427,20 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
             floorMesh.parent = floorRoot
             
             floorMeshesRef.current.push(floorMesh)
+            floorZoneMeshes.push(floorMesh)
             
             console.log(`Created extruded zone ${zone.name} on ${floor.name} at elevation ${floorElevation}m with height ${zoneHeight}m`)
           }
         })
+        
+        // Store zone meshes for this floor
+        zoneMeshesRef.current.set(floor.id, floorZoneMeshes)
       })
+      
+      // Initialize with first floor selected if available
+      if (spatialModel.building.floors.length > 0 && selectedViewFloorId === '') {
+        setSelectedViewFloorId(spatialModel.building.floors[0].id)
+      }
     } else if (walls.length > 0) {
       // Fallback: use provided walls if no spatial model
       const currentFloor = spatialModel && selectedFloorId 
@@ -486,6 +504,9 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
       wallMeshesRef.current = []
       floorMeshesRef.current.forEach(mesh => mesh.dispose())
       floorMeshesRef.current = []
+      floorRootsRef.current.clear()
+      zoneMeshesRef.current.clear()
+      wallMeshesPerFloorRef.current.clear()
       if (cameraRef.current && canvasRef.current) {
         cameraRef.current.detachControl()
       }
@@ -493,10 +514,92 @@ const SpatialViewBabylon: React.FC<SpatialViewBabylonProps> = ({ walls, spatialM
       engine.dispose()
     }
   }, [walls, spatialModel, selectedFloorId])
-
+  
+  // Effect to update visibility based on selected view floor
+  useEffect(() => {
+    if (!spatialModel || !sceneRef.current || spatialModel.building.floors.length === 0 || !selectedViewFloorId) return
+    
+    const floors = spatialModel.building.floors
+    const selectedIndex = floors.findIndex(f => f.id === selectedViewFloorId)
+    
+    if (selectedIndex === -1) return
+    
+    // Update visibility for each floor
+    floors.forEach((floor, index) => {
+      const floorRoot = floorRootsRef.current.get(floor.id)
+      const zoneMeshes = zoneMeshesRef.current.get(floor.id) || []
+      
+      if (!floorRoot) return
+      
+      if (index < selectedIndex) {
+        // Étages inférieurs : complètement visibles (avec murs)
+        floorRoot.setEnabled(true)
+        zoneMeshes.forEach(mesh => {
+          mesh.setEnabled(true)
+          if (mesh.material) {
+            const mat = mesh.material as StandardMaterial
+            mat.alpha = mesh.name.startsWith('zone_extruded_') ? 0.8 : 1.0
+          }
+        })
+      } else if (index === selectedIndex) {
+        // Étage sélectionné : zones visibles, murs cachés
+        // Pour voir l'intérieur, on rend les zones extrudées transparentes mais on garde le sol
+        floorRoot.setEnabled(true)
+        zoneMeshes.forEach(mesh => {
+          mesh.setEnabled(true)
+          if (mesh.material) {
+            const mat = mesh.material as StandardMaterial
+            if (mesh.name.startsWith('zone_extruded_')) {
+              // Rendre les murs (faces latérales) transparents pour voir l'intérieur
+              mat.alpha = 0.1 // Presque invisible pour voir l'intérieur
+            } else if (mesh.name.startsWith('zone_floor_')) {
+              // Le sol reste visible
+              mat.alpha = 1.0
+            }
+          }
+        })
+      } else {
+        // Étages supérieurs : invisibles
+        floorRoot.setEnabled(false)
+      }
+    })
+  }, [selectedViewFloorId, spatialModel])
+  
+  // Render function
   return (
     <div className="spatial-view-container">
       <canvas ref={canvasRef} className="spatial-view-canvas" />
+      {spatialModel && spatialModel.building.floors.length > 0 && (
+        <div className="floor-view-menu">
+          <h3>Sélection d'étage</h3>
+          <div className="control-group">
+            <label htmlFor="floor-view-select">Étage à visualiser :</label>
+            <select
+              id="floor-view-select"
+              value={selectedViewFloorId}
+              onChange={(e) => setSelectedViewFloorId(e.target.value)}
+            >
+              {spatialModel.building.floors.map((floor, index) => (
+                <option key={floor.id} value={floor.id}>
+                  {floor.name} (Étage {index})
+                </option>
+              ))}
+            </select>
+          </div>
+          {selectedViewFloorId && (
+            <div className="view-info">
+              <p>
+                <strong>Étage sélectionné :</strong> {spatialModel.building.floors.find(f => f.id === selectedViewFloorId)?.name}
+              </p>
+              <p className="info-text">
+                • Les étages inférieurs sont complètement visibles<br/>
+                • Les murs de l'étage sélectionné sont cachés<br/>
+                • Les étages supérieurs sont invisibles
+              </p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
